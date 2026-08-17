@@ -1710,6 +1710,77 @@ class TestDraftTargetPrecisionPairing:
         assert msg is None
 
 
+class TestDraftTargetGenerationPairing:
+    """check_draft_target_generation_pairing heuristics.
+
+    dflash-mlx resolves target ops purely by architecture (model_type +
+    tensor shapes), so a draft trained for one Qwen3.x generation loads fine
+    against a same-shape target from a different generation. It runs, but
+    draft weights are generation-specific, so this heuristic warns on an
+    explicit, differing Qwen3.x generation marker on both sides.
+    """
+
+    def _check(self, target, draft):
+        from omlx.engine.dflash import check_draft_target_generation_pairing
+
+        return check_draft_target_generation_pairing(target, draft)
+
+    def test_matched_generation_is_silent(self):
+        msg = self._check(
+            "mlx-community/Qwen3.6-27B-4bit",
+            "/models/z-lab/Qwen3.6-27B-DFlash",
+        )
+        assert msg is None
+
+    def test_mismatched_generation_warns(self):
+        """The exact pairing measured locally: Qwen3.8 target, Qwen3.6 draft."""
+        msg = self._check(
+            "mlx-community/Qwen3.8-27B-4bit",
+            "/models/z-lab/Qwen3.6-27B-DFlash",
+        )
+        assert msg is not None
+        assert "Qwen3.6" in msg
+        assert "Qwen3.8" in msg
+        assert "acceptance" in msg
+
+    def test_mismatched_generation_warns_regardless_of_direction(self):
+        msg = self._check(
+            "mlx-community/Qwen3.5-27B-4bit",
+            "/models/z-lab/Qwen3.6-27B-DFlash",
+        )
+        assert msg is not None
+
+    def test_base_qwen3_generation_matches_itself(self):
+        """Qwen3-4B (no minor version) is its own generation, distinct from 3.x."""
+        msg = self._check(
+            "Qwen/Qwen3-4B",
+            "/models/z-lab/Qwen3-4B-DFlash-b16",
+        )
+        assert msg is None
+
+    def test_base_qwen3_vs_dotted_generation_warns(self):
+        msg = self._check(
+            "Qwen/Qwen3-4B",
+            "/models/z-lab/Qwen3.6-27B-DFlash",
+        )
+        assert msg is not None
+
+    def test_non_qwen_target_is_silent(self):
+        """No Qwen3 marker on the target at all -- unknown, not mismatched."""
+        msg = self._check(
+            "/models/renamed-custom-target",
+            "/models/z-lab/Qwen3.6-27B-DFlash",
+        )
+        assert msg is None
+
+    def test_non_qwen_draft_is_silent(self):
+        msg = self._check(
+            "mlx-community/Qwen3.6-27B-4bit",
+            "/models/some/custom-draft",
+        )
+        assert msg is None
+
+
 class TestSpeculationStats:
     """Session speculation counters exposed for the dashboard (issue #2398)."""
 

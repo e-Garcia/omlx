@@ -98,6 +98,35 @@ DFlash registers `QwenGdnTargetOps`, `Gemma4TargetOps`, and `MuseGlimmerTargetOp
 
 Other model families (Llama, Gemma3, etc.) are not supported — they require both a trained DFlash draft checkpoint and a compatible target adapter in dflash-mlx.
 
+**Qwen3.8-27B** is not in the table above because no dedicated
+`Qwen3.8-27B-DFlash` draft has been published yet, but it needs no target-ops
+changes to work: `mlx-community/Qwen3.8-27B-4bit` shares `Qwen3.6-27B-4bit`'s
+architecture exactly (`model_type=qwen3_5`, 64 layers, hidden_size=5120,
+vocab_size=248320), and `QwenGdnTargetOps.supports_model` resolves purely on
+`model_type` + tensor shape — it has no per-checkpoint allowlist. Pointing
+`dflash_draft_model` at `z-lab/Qwen3.6-27B-DFlash` for a Qwen3.8-27B-4bit
+target loads and generates without error. It is **not currently a net win**,
+though: measured locally (500-token greedy generations, same prompt,
+mac-studio M4-class hardware),
+
+| Pairing | Acceptance | Tokens/cycle | Throughput |
+|---|---|---|---|
+| Qwen3.8-27B-4bit, no DFlash (baseline) | — | — | 27.9 tok/s |
+| Qwen3.8-27B-4bit + Qwen3.6-27B-DFlash (cross-generation) | 58.6% | 2.4 | 25.8 tok/s |
+| Qwen3.6-27B-4bit + Qwen3.6-27B-DFlash (matched, for reference) | 70.2% | 3.4 | 34.7 tok/s |
+
+The cross-generation pair loads and measurably speculates (58.6% of output
+tokens came from the draft), but the accepted run length per cycle is short
+enough that draft+verify overhead outweighs the savings — it ends up ~8%
+*slower* than plain decoding, not faster. Draft weights are trained via
+self-distillation against one specific target's own logits, so a draft from a
+different Qwen3.x generation predicting a different target's outputs is
+expected to see a real but smaller acceptance rate. `check_draft_target_generation_pairing`
+(`omlx/engine/dflash.py`) surfaces a dashboard warning when a draft and target
+carry different Qwen3.x generation markers, so this is discoverable without
+re-running the benchmark above. Until a dedicated Qwen3.8 draft is published,
+leave `dflash_enabled` off for Qwen3.8 targets.
+
 Laguna target and draft checkpoints must be from the same size family and should
 use Poolside's quantization-matched draft when one is published (for example,
 `Laguna-S-2.1-DFlash-NVFP4` with the NVFP4 target). A checkpoint that explicitly
@@ -241,6 +270,16 @@ Admin panel benchmark's batch throughput test is skipped for DFlashEngine since 
 ### 7. Greedy verification with temperature
 
 When temperature > 0, acceptance rate drops because draft and target independently sample from the logit distribution. The accepted tokens are always valid target model samples at the given temperature, but fewer draft tokens get accepted per cycle, reducing the speed benefit.
+
+### 8. Cross-generation draft reuse is architecturally possible, not free
+
+Because target-ops resolution keys on `model_type` + shape rather than a
+checkpoint identity, a draft published for one Qwen3.x generation loads
+against a same-shape target from a different generation with no code change
+and no load-time error (see the Qwen3.8-27B note under Supported Models
+above). Don't take load success as evidence of a speedup — check the
+dashboard's acceptance ratio and tokens/cycle, or the `DFlash generation
+complete` log line, before enabling it for real traffic.
 
 ---
 

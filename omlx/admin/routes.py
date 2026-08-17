@@ -5127,6 +5127,9 @@ def _build_active_models_data() -> dict:
         dflash_info = None
         if entry is not None and entry.engine is not None:
             pairing = getattr(entry.engine, "pairing_warning", None)
+            generation_pairing = getattr(
+                entry.engine, "generation_pairing_warning", None
+            )
             speculation = None
             get_speculation = getattr(entry.engine, "get_speculation_stats", None)
             if callable(get_speculation):
@@ -5134,10 +5137,11 @@ def _build_active_models_data() -> dict:
                     speculation = get_speculation()
                 except Exception:
                     logger.debug("get_speculation_stats failed", exc_info=True)
-            if speculation is not None or pairing:
+            if speculation is not None or pairing or generation_pairing:
                 dflash_info = {
                     "speculation": speculation,
                     "pairing_warning": pairing,
+                    "generation_pairing_warning": generation_pairing,
                 }
 
         models.append(

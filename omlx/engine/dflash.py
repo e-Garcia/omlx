@@ -218,6 +218,71 @@ def check_draft_target_precision_pairing(
     )
 
 
+_QWEN_GENERATION_RE = re.compile(r"Qwen3(?:\.(\d+))?", re.IGNORECASE)
+
+
+def _qwen_generation_tag(name: str) -> str | None:
+    """Extract a Qwen3.x generation marker (e.g. ``"3.6"``, ``"3"``) from a
+    checkpoint name or path. Returns ``None`` when the name carries no
+    recognizable Qwen3 generation marker at all — callers treat that as
+    "unknown", not "mismatched" (see check_draft_target_generation_pairing).
+    """
+    match = _QWEN_GENERATION_RE.search(str(name))
+    if match is None:
+        return None
+    minor = match.group(1)
+    return f"3.{minor}" if minor else "3"
+
+
+def check_draft_target_generation_pairing(
+    target_name: str,
+    draft_path: str,
+) -> str | None:
+    """Heuristic Qwen-generation-pairing check between a DFlash draft and its target.
+
+    dflash-mlx's target-ops resolution (``QwenGdnTargetOps.supports_model``) is
+    purely architecture-based — it checks ``model_type`` and tensor shapes, not
+    the specific checkpoint a draft was trained against. That means a draft
+    published for one Qwen3.x generation (e.g. z-lab's Qwen3.6-27B-DFlash) will
+    happily load and run against a same-shape target from a different
+    generation (e.g. Qwen3.8-27B): identical hidden_size/layer count/vocab
+    produces no load-time error.
+
+    It does load and run, but draft weights are generation-specific — trained
+    via self-distillation against one target's own logits — so acceptance on a
+    mismatched generation is measurably lower. In local testing (Qwen3.8-27B-4bit
+    target, Qwen3.6-27B-DFlash draft) that was 58-61% acceptance at ~2.4
+    tokens/cycle, against ~70% acceptance at ~3.4 tokens/cycle for the same
+    draft on its intended Qwen3.6-27B-4bit target — the mismatched pair ended
+    up slightly *slower* than plain decoding once draft+verify overhead is
+    counted, not faster. Results will vary by draft/target/hardware, so this is
+    a warning to benchmark, not a hard block.
+
+    Only fires when both sides carry an explicit, differing Qwen3.x generation
+    marker; either side missing one (custom rename, non-Qwen family) stays
+    silent rather than guessing.
+
+    Returns a warning message, or None when the generations match or either
+    side's generation can't be determined.
+    """
+    target_gen = _qwen_generation_tag(target_name)
+    draft_gen = _qwen_generation_tag(draft_path)
+    if target_gen is None or draft_gen is None or target_gen == draft_gen:
+        return None
+
+    target_base = Path(str(target_name).rstrip("/")).name
+    draft_base = Path(str(draft_path).rstrip("/")).name
+    return (
+        f"Possible DFlash generation mismatch: draft '{draft_base}' targets "
+        f"Qwen{draft_gen}, while target '{target_base}' is Qwen{target_gen}. "
+        "The draft still loads and runs (dflash-mlx's target ops are "
+        "architecture-based, not checkpoint-specific), but draft weights are "
+        "generation-specific, so acceptance is typically lower than a matched "
+        "pair and may not be a net speedup at all — check the dashboard's "
+        "acceptance ratio and tokens/cycle before relying on this pairing."
+    )
+
+
 class _DFlashPrefillGuard:
     """Prefill-memory guard target for DFlash's primary (speculative) path,
     which bypasses the Scheduler entirely.
@@ -358,6 +423,7 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
         # the dashboard) and per-session speculation counters fed from each
         # request's SummaryEvent.
         self._pairing_warning: str | None = None
+        self._generation_pairing_warning: str | None = None
         self._spec_stats_lock = threading.Lock()
         self._spec_last: dict[str, Any] | None = None
         self._spec_totals = {
@@ -623,6 +689,12 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
         )
         if self._pairing_warning:
             logger.warning(self._pairing_warning)
+
+        self._generation_pairing_warning = check_draft_target_generation_pairing(
+            self._model_name, self._draft_model_path
+        )
+        if self._generation_pairing_warning:
+            logger.warning(self._generation_pairing_warning)
 
         suppress_ref = (
             getattr(self._executor_tokenizer, "name_or_path", None) or self._model_name
@@ -1917,6 +1989,7 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
             "in_memory_cache": self._in_memory_cache_enabled,
             "ssd_cache": self._resolve_dflash_l2_dir() is not None,
             "pairing_warning": self._pairing_warning,
+            "generation_pairing_warning": self._generation_pairing_warning,
             "speculation": self.get_speculation_stats(),
         }
 
@@ -1924,6 +1997,11 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
     def pairing_warning(self) -> str | None:
         """Draft/target precision pairing warning from load time, if any."""
         return self._pairing_warning
+
+    @property
+    def generation_pairing_warning(self) -> str | None:
+        """Draft/target Qwen-generation mismatch warning from load time, if any."""
+        return self._generation_pairing_warning
 
     def _record_speculation_summary(self, summary: Any) -> None:
         """Fold one request's SummaryEvent into the session speculation stats.
